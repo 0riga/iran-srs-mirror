@@ -7,4 +7,9 @@
 ## Наборы
 
 <!-- SRS-LIST:START -->
+| Файл | Содержимое |
+|---|---|
+| [geosite-bluearchive.srs](https://github.com/0riga/iran-srs-mirror/releases/download/srs-e47de6f-dada8c5-7a0e5d1/geosite-bluearchive.srs) | domain |
+| [geosite-bluearchive@cn.srs](https://github.com/0riga/iran-srs-mirror/releases/download/srs-e47de6f-dada8c5-7a0e5d1/geosite-bluearchive%40cn.srs) | domain |
+| [geosite-nexon.srs](https://github.com/0riga/iran-srs-mirror/releases/download/srs-e47de6f-dada8c5-7a0e5d1/geosite-nexon.srs) | domain |
 <!-- SRS-LIST:END -->
