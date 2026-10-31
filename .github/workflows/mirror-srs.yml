@@ -1,4 +1,5 @@
 name: mirror-srs
+
 on:
   schedule:
     - cron: '17 4 * * *'
@@ -7,40 +8,47 @@ on:
 permissions:
   contents: write
 
+env:
+  SRC: Chocolate4U/Iran-sing-box-rules
+  BRANCH: rule-set
+  FILES: "geosite-bluearchive.srs geosite-bluearchive@cn.srs geosite-nexon.srs"
+  SING_BOX_VERSION: 1.11.0
+
 jobs:
   mirror:
     runs-on: ubuntu-latest
     env:
-      SRC: Chocolate4U/Iran-sing-box-rules
-      BRANCH: rule-set
       GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Достать нужные файлы из дерева ветки
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Получить дерево ветки-источника и собрать тег
         id: tree
         run: |
           curl -fsSL -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/$SRC/git/trees/$BRANCH?recursive=1" \
             -o tree.json
 
-          # Пути файлов — меняете под себя
-          FILES='geosite-bluearchive.srs
-          geosite-bluearchive@cn.srs
-          geosite-nexon.srs'
-          echo "$FILES" > files.txt
-
-          # sha каждого файла, в порядке files.txt
-          shas=$(jq -r --slurpfile f <(jq -R . files.txt | jq -s .) \
-            '. as $tree | $f[0][] as $p | ($tree.tree[] | select(.path==$p) | .sha[0:7])' \
-            tree.json)
-
-          tag="srs-$(echo "$shas" | tr '\n' '-' | sed 's/-$//')"
+          shas=""
+          for f in $FILES; do
+            sha=$(jq -r --arg p "$f" '.tree[] | select(.path==$p) | .sha' tree.json | cut -c1-7)
+            if [ -z "$sha" ]; then
+              echo "::error::файл не найден в дереве $BRANCH: $f"
+              exit 1
+            fi
+            shas="$shas-$sha"
+          done
+          tag="srs${shas}"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Тег: $tag"
 
       - name: Пропустить, если такой релиз уже есть
         id: check
         run: |
           if gh release view "${{ steps.tree.outputs.tag }}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "exists=1" >> "$GITHUB_OUTPUT"
+            echo "релиз ${{ steps.tree.outputs.tag }} уже есть — выходим"
           else
             echo "exists=0" >> "$GITHUB_OUTPUT"
           fi
@@ -48,11 +56,55 @@ jobs:
       - name: Скачать .srs
         if: steps.check.outputs.exists == '0'
         run: |
-          mkdir out
-          while read -r f; do
-            [ -z "$f" ] && continue
-            curl -fsSL "https://raw.githubusercontent.com/$SRC/$BRANCH/$f" -o "out/$(basename "$f")"
-          done < files.txt
+          mkdir -p out
+          for f in $FILES; do
+            curl -fsSL "https://raw.githubusercontent.com/$SRC/$BRANCH/$f" -o "out/$f"
+          done
+          ls -la out
+
+      - name: Скачать sing-box
+        if: steps.check.outputs.exists == '0'
+        run: |
+          curl -fsSL -o sb.tar.gz \
+            "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/sing-box-${SING_BOX_VERSION}-linux-amd64.tar.gz"
+          tar xzf sb.tar.gz
+          echo "SB=$(find . -maxdepth 2 -type f -name sing-box)" >> "$GITHUB_ENV"
+
+      - name: Проверить вид наборов и собрать summary
+        if: steps.check.outputs.exists == '0'
+        run: |
+          REL_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${{ steps.tree.outputs.tag }}"
+
+          {
+            echo "| Файл | Содержимое |"
+            echo "|---|---|"
+          } > summary.md
+
+          for f in out/*.srs; do
+            base=$(basename "$f")
+            "$SB" rule-set decompile "$f" -o "${f%.srs}.json" >/dev/null
+
+            kinds=$(jq -r '[.rules[] | keys[]] | unique | sort | join(",")' "${f%.srs}.json")
+            has_dom=0; has_ip=0
+            echo "$kinds" | grep -qE 'domain' && has_dom=1
+            echo "$kinds" | grep -q 'ip_cidr' && has_ip=1
+
+            if [ "$has_dom" = 1 ] && [ "$has_ip" = 1 ]; then kind="both"
+            elif [ "$has_ip" = 1 ]; then kind="prefixes"
+            elif [ "$has_dom" = 1 ]; then kind="domain"
+            else kind="empty"
+            fi
+
+            echo "$base: $kind"
+            if [ "$has_ip" = 1 ] && [ "$has_dom" = 1 ]; then
+              echo "::warning::$base содержит и домены, и подсети — проверьте kinds в sources.txt"
+            fi
+
+            enc=$(printf '%s' "$base" | sed 's/@/%40/g')
+            echo "| [$base]($REL_URL/$enc) | $kind |" >> summary.md
+          done
+
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Опубликовать релиз
         if: steps.check.outputs.exists == '0'
@@ -61,3 +113,42 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "Iran-sing-box-rules @ ${{ steps.tree.outputs.tag }}" \
             --notes "Зеркало выбранных .srs из $SRC@$BRANCH"
+
+      - name: Убедиться, что README.md существует
+        if: steps.check.outputs.exists == '0'
+        run: |
+          if [ ! -f README.md ]; then
+            cat > README.md <<'EOF'
+          # iran-srs-mirror
+
+          Зеркало выбранных `.srs` из [Chocolate4U/Iran-sing-box-rules](https://github.com/Chocolate4U/Iran-sing-box-rules) (ветка `rule-set`).
+
+          ## Наборы
+
+          <!-- SRS-LIST:START -->
+          <!-- SRS-LIST:END -->
+          EOF
+          fi
+
+      - name: Вставить summary в README.md
+        if: steps.check.outputs.exists == '0'
+        run: |
+          awk '
+            /<!-- SRS-LIST:START -->/ { print; system("cat summary.md"); skip=1; next }
+            /<!-- SRS-LIST:END -->/   { skip=0 }
+            !skip
+          ' README.md > README.md.new
+          mv README.md.new README.md
+
+      - name: Закоммитить README.md, если изменился
+        if: steps.check.outputs.exists == '0'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet README.md; then
+            git add README.md
+            git commit -m "README: обновлён список .srs (${{ steps.tree.outputs.tag }})"
+            git push
+          else
+            echo "README.md не изменился"
+          fi
