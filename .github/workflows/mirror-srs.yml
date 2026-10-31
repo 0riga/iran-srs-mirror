@@ -1,0 +1,63 @@
+name: mirror-srs
+on:
+  schedule:
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    env:
+      SRC: Chocolate4U/Iran-sing-box-rules
+      BRANCH: rule-set
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Достать нужные файлы из дерева ветки
+        id: tree
+        run: |
+          curl -fsSL -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$SRC/git/trees/$BRANCH?recursive=1" \
+            -o tree.json
+
+          # Пути файлов — меняете под себя
+          FILES='geosite-bluearchive.srs
+          geosite-bluearchive@cn.srs
+          geosite-nexon.srs'
+          echo "$FILES" > files.txt
+
+          # sha каждого файла, в порядке files.txt
+          shas=$(jq -r --slurpfile f <(jq -R . files.txt | jq -s .) \
+            '. as $tree | $f[0][] as $p | ($tree.tree[] | select(.path==$p) | .sha[0:7])' \
+            tree.json)
+
+          tag="srs-$(echo "$shas" | tr '\n' '-' | sed 's/-$//')"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Пропустить, если такой релиз уже есть
+        id: check
+        run: |
+          if gh release view "${{ steps.tree.outputs.tag }}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "exists=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Скачать .srs
+        if: steps.check.outputs.exists == '0'
+        run: |
+          mkdir out
+          while read -r f; do
+            [ -z "$f" ] && continue
+            curl -fsSL "https://raw.githubusercontent.com/$SRC/$BRANCH/$f" -o "out/$(basename "$f")"
+          done < files.txt
+
+      - name: Опубликовать релиз
+        if: steps.check.outputs.exists == '0'
+        run: |
+          gh release create "${{ steps.tree.outputs.tag }}" out/*.srs \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Iran-sing-box-rules @ ${{ steps.tree.outputs.tag }}" \
+            --notes "Зеркало выбранных .srs из $SRC@$BRANCH"
